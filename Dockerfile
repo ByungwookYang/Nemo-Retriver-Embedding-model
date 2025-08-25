@@ -2,8 +2,9 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
-# 필요한 패키지 설치
-RUN pip install transformers torch torchvision pillow fastapi uvicorn python-multipart sentence-transformers numpy
+# requirements 복사 및 설치
+COPY requirements.txt .
+RUN pip install -r requirements.txt
 
 # API 서버 파일 복사
 COPY main.py .
