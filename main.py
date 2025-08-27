@@ -1,7 +1,7 @@
 import os
+import sys
 import torch
 from flask import Flask, request, jsonify
-from transformers import AutoModel, AutoTokenizer, AutoConfig
 import logging
 import json
 
@@ -20,45 +20,35 @@ def load_model():
     
     model_path = "/app/models"
     
-    # config.json 내용 확인 및 출력
-    config_path = os.path.join(model_path, "config.json")
-    if os.path.exists(config_path):
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-            logger.info(f"Config contents: {config}")
-            
-            # model_type이 없으면 추가
-            if 'model_type' not in config:
-                logger.info("Adding model_type to config...")
-                config['model_type'] = 'llama'  # 기본값으로 llama 설정
-                
-                # 임시로 config 수정
-                with open(config_path, 'w') as fw:
-                    json.dump(config, fw, indent=2)
+    # 모델 경로를 Python path에 추가
+    sys.path.insert(0, model_path)
     
     logger.info(f"Loading model from: {model_path}")
     
     try:
-        # 더 직접적인 방법으로 로딩
-        from transformers.models.auto.modeling_auto import MODEL_FOR_PRETRAINING_MAPPING
+        # 커스텀 모델 클래스 직접 임포트
+        from modeling_llama_nemoretrievercolembed import llama_NemoRetrieverColEmbed, llama_NemoRetrieverColEmbedConfig
+        from transformers import AutoTokenizer
         
-        # 커스텀 모델 클래스 직접 import
-        import sys
-        sys.path.append(model_path)
-        
-        # 모델 로딩 시도
-        model = AutoModel.from_pretrained(
+        # Config 로드
+        config = llama_NemoRetrieverColEmbedConfig.from_pretrained(
             model_path,
-            trust_remote_code=True,
-            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto" if torch.cuda.is_available() else "cpu",
             local_files_only=True,
-            attn_implementation="eager",
-            use_safetensors=True,
-            revision=None,
-            force_download=False
+            trust_remote_code=True
         )
         
+        # 모델 직접 로드
+        model = llama_NemoRetrieverColEmbed.from_pretrained(
+            model_path,
+            config=config,
+            torch_dtype=torch.bfloat16,
+            device_map="cpu",  # 일단 CPU로
+            local_files_only=True,
+            trust_remote_code=True,
+            attn_implementation="eager"
+        )
+        
+        # 토크나이저 로드
         tokenizer = AutoTokenizer.from_pretrained(
             model_path,
             trust_remote_code=True,
@@ -68,34 +58,36 @@ def load_model():
         
         logger.info("✅ Model loaded successfully!")
         
-    except Exception as e:
-        logger.error(f"Model loading failed: {e}")
+    except ImportError as e:
+        logger.error(f"Failed to import custom model class: {e}")
         
-        # 마지막 수단: 모델명으로 직접 로딩 시도
+        # Fallback: AutoModel with trust_remote_code
         try:
-            logger.info("Trying to load with model name instead of path...")
+            from transformers import AutoModel, AutoTokenizer
+            
+            # transformers 최신 버전 필요할 수 있음
             model = AutoModel.from_pretrained(
-                "nvidia/llama-nemoretriever-colembed-3b-v1",
+                model_path,
                 trust_remote_code=True,
-                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                device_map="auto" if torch.cuda.is_available() else "cpu",
-                cache_dir=model_path,
+                torch_dtype=torch.bfloat16,
+                device_map="cpu",
                 local_files_only=True,
-                attn_implementation="eager"
+                revision=None,
+                force_download=False,
+                ignore_mismatched_sizes=True
             )
             
             tokenizer = AutoTokenizer.from_pretrained(
-                "nvidia/llama-nemoretriever-colembed-3b-v1",
+                model_path,
                 trust_remote_code=True,
-                cache_dir=model_path,
                 local_files_only=True
             )
             
-            logger.info("✅ Model loaded with model name!")
+            logger.info("✅ Model loaded with AutoModel fallback!")
             
         except Exception as e2:
-            logger.error(f"Both methods failed: {e2}")
-            raise e
+            logger.error(f"All loading methods failed: {e2}")
+            raise
 
 def generate_embedding(text):
     inputs = tokenizer(text, return_tensors='pt', padding=True, truncation=True, max_length=512)
@@ -103,7 +95,14 @@ def generate_embedding(text):
     
     with torch.no_grad():
         outputs = model(**inputs)
-        embedding = outputs.last_hidden_state.mean(dim=1)
+        
+        # ColBERT 스타일이므로 last_hidden_state 사용
+        if hasattr(outputs, 'last_hidden_state'):
+            embedding = outputs.last_hidden_state.mean(dim=1)
+        else:
+            # 다른 출력 형태일 수 있음
+            embedding = outputs[0].mean(dim=1) if isinstance(outputs, tuple) else outputs.mean(dim=1)
+            
         return embedding[0].cpu().float().numpy().tolist()
 
 @app.route('/v1/embeddings', methods=['POST'])
