@@ -4,41 +4,62 @@ from flask import Flask, request, jsonify
 from transformers import AutoModel, AutoTokenizer
 import logging
 
-# 로깅 설정
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 환경 설정
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 app = Flask(__name__)
 
-# 전역 변수
 model = None
 tokenizer = None
 
 def load_model():
     global model, tokenizer
     
-    model_path = "/app/model"
+    # 볼륨 마운트된 경로
+    model_path = "/app/models"  # 경로 수정
+    
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model path not found: {model_path}")
+    
+    # 파일 목록 확인
+    files = os.listdir(model_path)
+    logger.info(f"Files in model directory: {files}")
+    
     logger.info(f"Loading model from: {model_path}")
     
-    model = AutoModel.from_pretrained(
-        model_path,
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        local_files_only=True,
-        attn_implementation="eager"
-    )
-    
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_path,
-        trust_remote_code=True,
-        local_files_only=True
-    )
-    
-    logger.info("✅ Model loaded!")
+    try:
+        # 더 안전한 로딩
+        model = AutoModel.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16,
+            device_map="cpu",  # 일단 CPU로 시작
+            local_files_only=True,
+            attn_implementation="eager",
+            use_safetensors=True
+        )
+        
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=True,
+            local_files_only=True,
+            use_fast=False  # slow tokenizer 사용
+        )
+        
+        logger.info("✅ Model loaded!")
+        
+    except Exception as e:
+        logger.error(f"Model loading failed: {e}")
+        # config.json 내용 확인
+        config_path = os.path.join(model_path, "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                import json
+                config = json.load(f)
+                logger.info(f"Config contents: {config}")
+        raise
 
 def generate_embedding(text):
     inputs = tokenizer(text, return_tensors='pt', padding=True, truncation=True, max_length=512)
